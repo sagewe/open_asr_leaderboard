@@ -20,8 +20,9 @@ wer_metric = evaluate.load("wer")
 
 def dataset_iterator(dataset):
     for i, item in enumerate(dataset):
+        # import ipdb; ipdb.set_trace()
         yield {
-            **np.float32(item["array"]),
+            **item["audio"],
             "reference": item["norm_text"],
         }
 
@@ -46,42 +47,10 @@ def write_audio(buffer, cache_prefix) -> list:
     return data_paths
 
 
-def pack_results(results: list, buffer, transcriptions):
-    for sample, transcript in zip(buffer, transcriptions):
-        result = {'reference': sample['reference'], 'pred_text': transcript}
+def pack_results(results: list, references, transcriptions):
+    for sample, transcript in zip(references, transcriptions):
+        result = {'reference': sample, 'pred_text': transcript}
         results.append(result)
-    return results
-
-
-def buffer_audio_and_transcribe(model: ASRModel, dataset, batch_size: int, cache_prefix: str, verbose: bool = True):
-    buffer = []
-    results = []
-    for sample in tqdm(dataset_iterator(dataset), desc='Evaluating: Sample id', unit='', disable=not verbose):
-        buffer.append(sample)
-        import ipdb; ipdb.set_trace()
-
-        if len(buffer) == batch_size:
-            # filepaths = write_audio(buffer, cache_prefix)
-            transcriptions = model.transcribe(buffer, batch_size=batch_size, verbose=False)
-            # if transcriptions form a tuple (from RNNT), extract just "best" hypothesis 
-            if type(transcriptions) == tuple and len(transcriptions) == 2:
-                transcriptions = transcriptions[0]
-            results = pack_results(results, buffer, transcriptions)
-            buffer.clear()
-
-    if len(buffer) > 0:
-        filepaths = write_audio(buffer, cache_prefix)
-        transcriptions = model.transcribe(filepaths, batch_size=batch_size, verbose=False)
-        # if transcriptions form a tuple (from RNNT), extract just "best" hypothesis
-        if type(transcriptions) == tuple and len(transcriptions) == 2:
-            transcriptions = transcriptions[0]
-        results = pack_results(results, buffer, transcriptions)
-        buffer.clear()
-
-    # Delete temp cache dir
-    if os.path.exists(DATA_CACHE_DIR):
-        shutil.rmtree(DATA_CACHE_DIR)
-
     return results
 
 
@@ -100,36 +69,70 @@ def main(args):
 
     dataset = data_utils.load_data(args)
 
+    def benchmark_batch(batch):
+
+        # get audio stats
+        audio = [np.float32(sample["array"]) for sample in batch["audio"]]
+        batch["audio_length"] = [len(sample) / 16_000 for sample in audio]
+        minibatch_size = len(audio)
+
+        # timing step
+        start_time = time.time()
+        transcriptions = asr_model.transcribe(audio, batch_size=minibatch_size, verbose=False)
+        
+        # normalize by minibatch size since we want the per-sample time
+        batch["transcription_time"] = minibatch_size * [(time.time() - start_time) / minibatch_size]
+
+        if type(transcriptions) == tuple and len(transcriptions) == 2:
+                transcriptions = transcriptions[0]
+        # normalize transcriptions with English normalizer
+        batch["predictions"] = [data_utils.normalizer(pred) for pred in transcriptions]
+        batch["references"] = batch["norm_text"]
+
+        return batch
+
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling dataset to first {args.max_eval_samples} samples !")
         dataset = dataset.take(args.max_eval_samples)
 
     dataset = data_utils.prepare_data(dataset)
 
-    predictions = []
-    references = []
+    dataset = dataset.map(benchmark_batch, batch_size=args.batch_size, batched=True, remove_columns=["audio"])
 
-    # run streamed inference
-    cache_prefix = (f"{args.model_id.replace('/', '-')}-{args.dataset_path.replace('/', '')}-"
-                    f"{args.dataset.replace('/', '-')}-{args.split}")
-    # time the results
-    start = time.time()
-    results = buffer_audio_and_transcribe(asr_model, dataset, args.batch_size, cache_prefix, verbose=True)
-    end = time.time()
-    print("Time taken for dataset", end - start, "seconds")
-    for sample in results:
-        predictions.append(data_utils.normalizer(sample["pred_text"]))
-        references.append(sample["reference"])
+    all_results = {
+        "audio_length": [],
+        "transcription_time": [],
+        "predictions": [],
+        "references": [],
+    }
+    result_iter = iter(dataset)
+    for result in tqdm(result_iter, desc="Samples"):
+        for key in all_results:
+            all_results[key].append(result[key])
 
-    # Write manifest results
+    # Write manifest results (WER and RTFX)
     manifest_path = data_utils.write_manifest(
-        references, predictions, args.model_id, args.dataset_path, args.dataset, args.split
+        all_results["references"],
+        all_results["predictions"],
+        args.model_id,
+        args.dataset_path,
+        args.dataset,
+        args.split,
+        audio_length=all_results["audio_length"],
+        transcription_time=all_results["transcription_time"],
     )
+
     print("Results saved at path:", os.path.abspath(manifest_path))
 
-    wer = wer_metric.compute(references=references, predictions=predictions)
+    wer = wer_metric.compute(references=all_results['references'], predictions=all_results['predictions'])
     wer = round(100 * wer, 2)
 
+    transcription_time = sum(all_results["transcription_time"])
+    audio_length = sum(all_results["audio_length"])
+    rtfx = audio_length / transcription_time
+    rtfx = round(rtfx, 2)
+
+    print("RTFX:", rtfx)
     print("WER:", wer, "%")
 
 
