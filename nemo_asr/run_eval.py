@@ -8,8 +8,10 @@ import soundfile
 
 from tqdm import tqdm
 from normalizer import data_utils
+import numpy as np
 
 from nemo.collections.asr.models import ASRModel
+import time
 
 DATA_CACHE_DIR = os.path.join(os.getcwd(), "audio_cache")
 
@@ -19,11 +21,8 @@ wer_metric = evaluate.load("wer")
 def dataset_iterator(dataset):
     for i, item in enumerate(dataset):
         yield {
-            **item["audio"],
+            **np.float32(item["array"]),
             "reference": item["norm_text"],
-            "audio_filename": f"file_{i}",
-            "sample_rate": 16_000,
-            "sample_id": i,
         }
 
 
@@ -59,11 +58,12 @@ def buffer_audio_and_transcribe(model: ASRModel, dataset, batch_size: int, cache
     results = []
     for sample in tqdm(dataset_iterator(dataset), desc='Evaluating: Sample id', unit='', disable=not verbose):
         buffer.append(sample)
+        import ipdb; ipdb.set_trace()
 
         if len(buffer) == batch_size:
-            filepaths = write_audio(buffer, cache_prefix)
-            transcriptions = model.transcribe(filepaths, batch_size=batch_size, verbose=False)
-            # if transcriptions form a tuple (from RNNT), extract just "best" hypothesis
+            # filepaths = write_audio(buffer, cache_prefix)
+            transcriptions = model.transcribe(buffer, batch_size=batch_size, verbose=False)
+            # if transcriptions form a tuple (from RNNT), extract just "best" hypothesis 
             if type(transcriptions) == tuple and len(transcriptions) == 2:
                 transcriptions = transcriptions[0]
             results = pack_results(results, buffer, transcriptions)
@@ -112,7 +112,11 @@ def main(args):
     # run streamed inference
     cache_prefix = (f"{args.model_id.replace('/', '-')}-{args.dataset_path.replace('/', '')}-"
                     f"{args.dataset.replace('/', '-')}-{args.split}")
+    # time the results
+    start = time.time()
     results = buffer_audio_and_transcribe(asr_model, dataset, args.batch_size, cache_prefix, verbose=True)
+    end = time.time()
+    print("Time taken for dataset", end - start, "seconds")
     for sample in results:
         predictions.append(data_utils.normalizer(sample["pred_text"]))
         references.append(sample["reference"])
