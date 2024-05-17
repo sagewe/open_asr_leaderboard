@@ -18,42 +18,6 @@ DATA_CACHE_DIR = os.path.join(os.getcwd(), "audio_cache")
 wer_metric = evaluate.load("wer")
 
 
-def dataset_iterator(dataset):
-    for i, item in enumerate(dataset):
-        # import ipdb; ipdb.set_trace()
-        yield {
-            **item["audio"],
-            "reference": item["norm_text"],
-        }
-
-
-def write_audio(buffer, cache_prefix) -> list:
-    cache_dir = os.path.join(DATA_CACHE_DIR, cache_prefix)
-
-    if os.path.exists(cache_dir):
-        shutil.rmtree(cache_dir, ignore_errors=True)
-
-    os.makedirs(cache_dir)
-
-    data_paths = []
-    for idx, data in enumerate(buffer):
-        fn = os.path.basename(data['audio_filename'])
-        fn = os.path.splitext(fn)[0]
-        path = os.path.join(cache_dir, f"{idx}_{fn}.wav")
-        data_paths.append(path)
-
-        soundfile.write(path, data["array"], samplerate=data['sample_rate'])
-
-    return data_paths
-
-
-def pack_results(results: list, references, transcriptions):
-    for sample, transcript in zip(references, transcriptions):
-        result = {'reference': sample, 'pred_text': transcript}
-        results.append(result)
-    return results
-
-
 def main(args):
 
     if args.device >= 0:
@@ -96,8 +60,12 @@ def main(args):
         dataset = dataset.take(args.max_eval_samples)
 
     dataset = data_utils.prepare_data(dataset)
-
-    dataset = dataset.map(benchmark_batch, batch_size=args.batch_size, batched=True, remove_columns=["audio"])
+    asr_model.cfg.decoding.strategy = "greedy_batched"
+    asr_model.change_decoding_strategy(asr_model.cfg.decoding)
+    
+    with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+        with torch.inference_mode():
+            dataset = dataset.map(benchmark_batch, batch_size=args.batch_size, batched=True, remove_columns=["audio"])
 
     all_results = {
         "audio_length": [],

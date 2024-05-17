@@ -49,7 +49,8 @@ do
         --split="test.clean" \
         --device=${DEVICE_ID} \
         --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1 
+        --max_eval_samples=-1 \
+	--no-streaming
 
     # python run_eval.py \
     #     --model_id=${MODEL_ID} \
