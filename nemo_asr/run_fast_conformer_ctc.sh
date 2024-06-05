@@ -42,24 +42,23 @@ do
     #     --batch_size=${BATCH_SIZE} \
     #     --max_eval_samples=-1 
 
-    python run_eval.py \
-        --model_id=${MODEL_ID} \
-        --dataset_path="open-asr-leaderboard/datasets-test-only" \
-        --dataset="librispeech" \
-        --split="test.clean" \
-        --device=${DEVICE_ID} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1 \
-	--no-streaming
-
     # python run_eval.py \
     #     --model_id=${MODEL_ID} \
     #     --dataset_path="open-asr-leaderboard/datasets-test-only" \
     #     --dataset="librispeech" \
-    #     --split="test.other" \
+    #     --split="test.clean" \
     #     --device=${DEVICE_ID} \
     #     --batch_size=${BATCH_SIZE} \
-    #     --max_eval_samples=-1 
+    #     --max_eval_samples=-1
+
+    python run_eval.py \
+        --model_id=${MODEL_ID} \
+        --dataset_path="open-asr-leaderboard/datasets-test-only" \
+        --dataset="librispeech" \
+        --split="test.other" \
+        --device=${DEVICE_ID} \
+        --batch_size=${BATCH_SIZE} \
+        --max_eval_samples=-1 
 
     # python run_eval.py \
     #     --model_id=${MODEL_ID} \
@@ -100,7 +99,7 @@ do
     # Evaluate results
     RUNDIR=`pwd` && \
     cd ../normalizer && \
-    python -c "import eval_utils; eval_utils.score_results('${RUNDIR}/results', '${MODEL_ID}')" && \
+    # python -c "import eval_utils; eval_utils.score_results('${RUNDIR}/results', '${MODEL_ID}')" && \
     cd $RUNDIR
 
 done

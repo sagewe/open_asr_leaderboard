@@ -13,12 +13,18 @@ import numpy as np
 from nemo.collections.asr.models import ASRModel
 import time
 
-DATA_CACHE_DIR = os.path.join(os.getcwd(), "audio_cache")
 
 wer_metric = evaluate.load("wer")
 
 
 def main(args):
+
+    DATA_CACHE_DIR = os.path.join(os.getcwd(), "audio_cache")
+    DATASET_NAME = args.dataset
+
+    CACHE_DIR = os.path.join(DATA_CACHE_DIR, DATASET_NAME)
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
 
     if args.device >= 0:
         device = torch.device(f"cuda:{args.device}")
@@ -29,31 +35,32 @@ def main(args):
         asr_model = ASRModel.restore_from(args.model_id, map_location=device)
     else:
         asr_model = ASRModel.from_pretrained(args.model_id, map_location=device)  # type: ASRModel
-    asr_model.freeze()
+    asr_model.eval()
+    asr_model.to(torch.bfloat16)
 
     dataset = data_utils.load_data(args)
 
-    def benchmark_batch(batch):
+    def download_audio_files(batch):
 
-        # get audio stats
-        audio = [np.float32(sample["array"]) for sample in batch["audio"]]
-        batch["audio_length"] = [len(sample) / 16_000 for sample in audio]
-        minibatch_size = len(audio)
+        # download audio files and write the paths, transcriptions and durations to a manifest file
+        audio_paths = []
+        durations = []
 
-        # timing step
-        start_time = time.time()
-        transcriptions = asr_model.transcribe(audio, batch_size=minibatch_size, verbose=False)
+        for id, sample in zip(batch["id"], batch["audio"]):
+            # import ipdb; ipdb.set_trace()
+            audio_path = os.path.join(CACHE_DIR, f"{id}.wav")
+            if not os.path.exists(audio_path):
+                soundfile.write(audio_path, np.float32(sample["array"]), 16_000)
+            audio_paths.append(audio_path)
+            durations.append(len(sample["array"]) / 16_000)
+
         
-        # normalize by minibatch size since we want the per-sample time
-        batch["transcription_time"] = minibatch_size * [(time.time() - start_time) / minibatch_size]
-
-        if type(transcriptions) == tuple and len(transcriptions) == 2:
-                transcriptions = transcriptions[0]
-        # normalize transcriptions with English normalizer
-        batch["predictions"] = [data_utils.normalizer(pred) for pred in transcriptions]
         batch["references"] = batch["norm_text"]
+        batch["audio_filepaths"] = audio_paths
+        batch["durations"] = durations
 
         return batch
+
 
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling dataset to first {args.max_eval_samples} samples !")
@@ -62,42 +69,63 @@ def main(args):
     dataset = data_utils.prepare_data(dataset)
     asr_model.cfg.decoding.strategy = "greedy_batched"
     asr_model.change_decoding_strategy(asr_model.cfg.decoding)
+    # prepraing the offline dataset
+    # dataset = dataset.map(lambda x: x, batch_size=args.batch_size, batched=True)
     
-    with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-        with torch.inference_mode():
-            dataset = dataset.map(benchmark_batch, batch_size=args.batch_size, batched=True, remove_columns=["audio"])
+    dataset = dataset.map(download_audio_files, batch_size=args.batch_size, batched=True, remove_columns=["audio"])
 
-    all_results = {
-        "audio_length": [],
-        "transcription_time": [],
-        "predictions": [],
+    # Write manifest from daraset batch using json and keys audio_filepath, duration, text
+
+    all_data = {
+        "audio_filepaths": [],
+        "durations": [],
         "references": [],
     }
-    result_iter = iter(dataset)
-    for result in tqdm(result_iter, desc="Samples"):
-        for key in all_results:
-            all_results[key].append(result[key])
+
+    data_itr = iter(dataset)
+    for data in tqdm(data_itr, desc="Downloading Samples"):
+        # import ipdb; ipdb.set_trace()
+        for key in all_data:
+            all_data[key].append(data[key])
+    
+    # Sort audio_filepaths and references based on durations values
+    sorted_indices = sorted(range(len(all_data["durations"])), key=lambda k: all_data["durations"][k], reverse=True)
+    all_data["audio_filepaths"] = [all_data["audio_filepaths"][i] for i in sorted_indices]
+    all_data["references"] = [all_data["references"][i] for i in sorted_indices]
+    all_data["durations"] = [all_data["durations"][i] for i in sorted_indices]
+    
+
+    start_time = time.time()
+    with torch.cuda.amp.autocast(enabled=False, dtype=torch.bfloat16):
+        with torch.inference_mode():
+            transcriptions = asr_model.transcribe(all_data["audio_filepaths"], batch_size=args.batch_size, verbose=False, num_workers=1)
+    end_time = time.time()
+
+    total_time = end_time - start_time
+
+    # normalize transcriptions with English normalizer
+    predictions = [data_utils.normalizer(pred) for pred in transcriptions]
 
     # Write manifest results (WER and RTFX)
     manifest_path = data_utils.write_manifest(
-        all_results["references"],
-        all_results["predictions"],
+        all_data["references"],
+        predictions,
         args.model_id,
         args.dataset_path,
         args.dataset,
         args.split,
-        audio_length=all_results["audio_length"],
-        transcription_time=all_results["transcription_time"],
+        audio_length=all_data["durations"],
+        # transcription_time=all_results["transcription_time"],
     )
 
     print("Results saved at path:", os.path.abspath(manifest_path))
 
-    wer = wer_metric.compute(references=all_results['references'], predictions=all_results['predictions'])
+    wer = wer_metric.compute(references=all_data['references'], predictions=predictions)
     wer = round(100 * wer, 2)
 
-    transcription_time = sum(all_results["transcription_time"])
-    audio_length = sum(all_results["audio_length"])
-    rtfx = audio_length / transcription_time
+    # transcription_time = sum(all_results["transcription_time"])
+    audio_length = sum(all_data["durations"])
+    rtfx = audio_length / total_time
     rtfx = round(rtfx, 2)
 
     print("RTFX:", rtfx)
