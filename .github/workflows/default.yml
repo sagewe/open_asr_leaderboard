@@ -1,0 +1,52 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Docker Build (default)
+
+# Controls when the action will run. Triggers the workflow on push or pull request
+# events but only for the master branch
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+env:
+  IMAGE_NAME: sagewei0/open_asr_leaderboard
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  docker-default:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          ${{ env.IMAGE_NAME }}
+        # https://github.com/docker/metadata-action?tab=readme-ov-file#flavor-input
+        flavor: |
+          suffix=${{ matrix.tag-suffix}},onlatest=true
+        tags: |
+          type=semver,pattern={{major}}.{{minor}}.{{patch}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        platforms: linux/amd64
+        tags: ${{ steps.meta.outputs.tags }}
+        cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+        cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max

@@ -4,6 +4,7 @@ import os
 import time
 
 import evaluate
+from evaluate.module import Value
 from faster_whisper import WhisperModel
 from tqdm import tqdm
 
@@ -16,14 +17,19 @@ def main(args) -> None:
     """Main function to run evaluation on a dataset."""
     asr_model = WhisperModel(
         model_size_or_path=args.model_id,
-        compute_type="float16",
-        device="cuda",
-        device_index=args.device
+        cpu_threads=args.cpu_threads,
+        compute_type="default",
+        device=args.device,
+        device_index=args.device_index,
     )
 
     def benchmark(batch):
         start_time = time.time()
-        segments, _ = asr_model.transcribe(batch["audio"]["array"], language="en")
+        segments, _ = asr_model.transcribe(batch["audio"]["array"], 
+                                           language="ar",
+                                           beam_size = 1,
+                                           best_of=1,
+                                           )
         outputs = [segment._asdict() for segment in segments]
         batch["transcription_time_s"] = time.time() - start_time
         batch["predictions"] = data_utils.normalizer("".join([segment["text"] for segment in outputs])).strip()
@@ -51,8 +57,14 @@ def main(args) -> None:
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
     dataset = data_utils.prepare_data(dataset)
+    def add_audio_length_s(example):
+        example["audio_length_s"] = example["audio"]["array"].shape[0] / example["audio"]["sampling_rate"]
+        return example
+    dataset = dataset.map(add_audio_length_s)
+    
 
     dataset = dataset.map(benchmark, remove_columns=["audio"])
+    print(f"size of dataset: {len(dataset)}, {dataset}")
 
     all_results = {
         "audio_length_s": [],
@@ -99,13 +111,6 @@ if __name__ == "__main__":
         '--dataset_path', type=str, default='esb/datasets', help='Dataset path. By default, it is `esb/datasets`'
     )
     parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        help="Dataset name. *E.g.* `'librispeech_asr` for the LibriSpeech ASR dataset, or `'common_voice'` for Common Voice. The full list of dataset names "
-            "can be found at `https://huggingface.co/datasets/esb/datasets`"
-    )
-    parser.add_argument(
         "--split",
         type=str,
         default="test",
@@ -113,10 +118,23 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--device",
-        type=int,
-        default=-1,
-        help="The device to run the pipeline on. -1 for CPU (default), 0 for the first GPU and so on.",
+        type=str,
+        default="cuda",
+        help="cpu or cuda",
     )
+    parser.add_argument(
+        "--device_index",
+        type=int,
+        default=0,
+        help="0 for the first GPU and so on.",
+    )
+    parser.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=10,
+        help="Number of CPU threads to use.",
+    )
+    
     parser.add_argument(
         "--max_eval_samples",
         type=int,
